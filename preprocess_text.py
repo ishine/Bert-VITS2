@@ -1,14 +1,16 @@
 import json
+import os
 from collections import defaultdict
 from random import shuffle
 from typing import Optional
-import os
 
-from tqdm import tqdm
 import click
-from text.cleaner import clean_text
+from tqdm import tqdm
+
 from config import config
-from infer import latest_version
+from text.cleaner import clean_text
+from common.stdout_wrapper import SAFE_STDOUT
+from common.log import logger
 
 preprocess_text_config = config.preprocess_text_config
 
@@ -48,29 +50,26 @@ def preprocess(
     if clean:
         with open(cleaned_path, "w", encoding="utf-8") as out_file:
             with open(transcription_path, "r", encoding="utf-8") as trans_file:
-                lines = trans_file.readlines()
-                # print(lines, ' ', len(lines))
-                if len(lines) != 0:
-                    for line in tqdm(lines):
-                        try:
-                            utt, spk, language, text = line.strip().split("|")
-                            norm_text, phones, tones, word2ph = clean_text(
-                                text, language
+                for line in tqdm(trans_file, file=SAFE_STDOUT):
+                    try:
+                        utt, spk, language, text = line.strip().split("|")
+                        norm_text, phones, tones, word2ph = clean_text(text, language)
+                        out_file.write(
+                            "{}|{}|{}|{}|{}|{}|{}\n".format(
+                                utt,
+                                spk,
+                                language,
+                                norm_text,
+                                " ".join(phones),
+                                " ".join([str(i) for i in tones]),
+                                " ".join([str(i) for i in word2ph]),
                             )
-                            out_file.write(
-                                "{}|{}|{}|{}|{}|{}|{}\n".format(
-                                    utt,
-                                    spk,
-                                    language,
-                                    norm_text,
-                                    " ".join(phones),
-                                    " ".join([str(i) for i in tones]),
-                                    " ".join([str(i) for i in word2ph]),
-                                )
-                            )
-                        except Exception as e:
-                            print(line)
-                            print(f"生成训练集和验证集时发生错误！, 详细信息:\n{e}")
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"An error occurred while generating the training set and validation set, at line:\n{line}\nDetails:\n{e}"
+                        )
+                        raise
 
     transcription_path = cleaned_path
     spk_utt_map = defaultdict(list)
@@ -85,12 +84,12 @@ def preprocess(
             utt, spk, language, text, phones, tones, word2ph = line.strip().split("|")
             if utt in audioPaths:
                 # 过滤数据集错误：相同的音频匹配多个文本，导致后续bert出问题
-                print(f"重复音频文本：{line}")
+                logger.warning(f"Same audio matches multiple texts: {line}")
                 countSame += 1
                 continue
             if not os.path.isfile(utt):
                 # 过滤数据集错误：不存在对应音频
-                print(f"没有找到对应的音频：{utt}")
+                logger.warning(f"Audio not found: {utt}")
                 countNotFound += 1
                 continue
             audioPaths.add(utt)
@@ -98,7 +97,9 @@ def preprocess(
             if spk not in spk_id_map.keys():
                 spk_id_map[spk] = current_sid
                 current_sid += 1
-        print(f"总重复音频数：{countSame}，总未找到的音频数:{countNotFound}")
+        logger.info(
+            f"Total repeated audios: {countSame}, Total number of audio not found: {countNotFound}"
+        )
 
     train_list = []
     val_list = []
@@ -125,7 +126,7 @@ def preprocess(
     json_config["data"]["spk2id"] = spk_id_map
     json_config["data"]["n_speakers"] = len(spk_id_map)
     # 新增写入：写入训练版本、数据集路径
-    json_config["version"] = latest_version
+    # json_config["version"] = latest_version
     json_config["data"]["training_files"] = os.path.normpath(train_path).replace(
         "\\", "/"
     )
@@ -134,7 +135,7 @@ def preprocess(
     )
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(json_config, f, indent=2, ensure_ascii=False)
-    print("训练集和验证集生成完成！")
+    logger.info("Training set and validation set generation from texts is complete!")
 
 
 if __name__ == "__main__":
